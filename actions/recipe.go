@@ -159,6 +159,8 @@ func (y *YamlAction) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		y.Action = &OverlayAction{}
 	case "image-partition":
 		y.Action = &ImagePartitionAction{}
+	case "image-standalone-partitions":
+		y.Action = &ImageStandalonePartitionsAction{}
 	case "install-deb":
 		y.Action = NewInstallDebAction()
 	case "filesystem-deploy":
