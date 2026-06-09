@@ -182,10 +182,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/docker/go-units"
-	"github.com/freddierice/go-losetup/v2"
-	"github.com/go-debos/fakemachine"
-	"github.com/google/uuid"
 	"log"
 	"os"
 	"os/exec"
@@ -197,6 +193,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/docker/go-units"
+	"github.com/freddierice/go-losetup/v2"
+	"github.com/go-debos/fakemachine"
+	"github.com/google/uuid"
 
 	"github.com/go-debos/debos"
 )
@@ -231,7 +232,10 @@ type imageLocker struct {
 	fd *os.File
 }
 
-func lockImage(context *debos.Context) (*imageLocker, error) {
+func lockImage(context *debos.Context, noop bool) (*imageLocker, error) {
+	if noop {
+		return &imageLocker{}, nil
+	}
 	fd, err := os.Open(context.Image)
 	if err != nil {
 		return nil, err
@@ -244,7 +248,9 @@ func lockImage(context *debos.Context) (*imageLocker, error) {
 }
 
 func (i imageLocker) unlock() {
-	i.fd.Close()
+	if i.fd != nil {
+		i.fd.Close()
+	}
 }
 
 type ImagePartitionAction struct {
@@ -259,6 +265,7 @@ type ImagePartitionAction struct {
 	size             int64
 	loopDev          losetup.Device
 	usingLoop        bool
+	Standalone       bool
 }
 
 func (p *Partition) UnmarshalYAML(unmarshal func(interface{}) error) error {
@@ -511,14 +518,7 @@ func (i *ImagePartitionAction) PreNoMachine(context *debos.Context) error {
 	return nil
 }
 
-func (i ImagePartitionAction) Run(context *debos.Context) error {
-	/* On certain disk device events udev will call the BLKRRPART ioctl to
-	 * re-read the partition table. This will cause the partition devices
-	 * (e.g. vda3) to temporarily disappear while the rescanning happens.
-	 * udev does this while holding an exclusive flock. This means to avoid partition
-	 * devices disappearing while doing operations on them (e.g. formatting
-	 * and mounting) we need to do it while holding an exclusive lock
-	 */
+func (i *ImagePartitionAction) createAndFormatPartitions(context *debos.Context) error {
 	command := []string{"parted", "-s", context.Image, "mklabel", i.PartitionType}
 	if len(i.GptGap) > 0 {
 		command = append(command, i.GptGap)
@@ -644,6 +644,88 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 			debos.Partition{Name: p.Name, DevicePath: devicePath})
 	}
 
+	return nil
+}
+
+func (part *Partition) checkSize() (imgSize int64, err error) {
+	var getSizeValueFunc func(size string) (int64, error)
+	if regexp.MustCompile(`^[0-9.]+[kmgtp]ib+$`).MatchString(strings.ToLower(i.ImageSize)) {
+		getSizeValueFunc = units.RAMInBytes
+	} else {
+		getSizeValueFunc = units.FromHumanSize
+	}
+
+	start, err := getSizeValueFunc(part.Start)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse partition start size: %w", err)
+	}
+	if start != 0 {
+		return 0, fmt.Errorf("invalid partition start size: %s, when in standalone mode start should be 0", part.Start)
+	}
+
+	end, err := getSizeValueFunc(part.End)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse partition end size: %w", err)
+	}
+	if end <= 0 {
+		return 0, fmt.Errorf("invalid partition end size: %s, when in standalone mode end should be greater than 0", part.End)
+	}
+
+	return end, nil
+}
+
+func (i *ImagePartitionAction) createStandalonePartitions(context *debos.Context) error {
+	for idx := range i.Partitions {
+		current_partition := &i.Partitions[idx]
+
+		imagePath := path.Join(context.Artifactdir, i.ImageName+"-"+current_partition.Name)
+		image, err := os.OpenFile(imagePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+
+		if err != nil {
+			return fmt.Errorf("couldn't open partition file: %w", err)
+		}
+
+		size, err := current_partition.checkSize()
+		if err != nil {
+			return fmt.Errorf("invalid partition size: %w", err)
+		}
+
+		err = image.Truncate(size)
+		if err != nil {
+			return fmt.Errorf("couldn't resize partition file: %w", err)
+		}
+
+		image.Close()
+		err = i.formatPartition(current_partition, *context)
+		if err != nil {
+			return err
+		}
+
+		devicePath := imagePath
+		context.ImagePartitions = append(context.ImagePartitions,
+			debos.Partition{Name: i.Partitions[idx].Name, DevicePath: devicePath})
+	}
+
+	return nil
+}
+
+func (i ImagePartitionAction) Run(context *debos.Context) error {
+	/* On certain disk device events udev will call the BLKRRPART ioctl to
+	 * re-read the partition table. This will cause the partition devices
+	 * (e.g. vda3) to temporarily disappear while the rescanning happens.
+	 * udev does this while holding an exclusive flock. This means to avoid partition
+	 * devices disappearing while doing operations on them (e.g. formatting
+	 * and mounting) we need to do it while holding an exclusive lock
+	 */
+
+	if i.Standalone {
+		fmt.Println("Running in standalone mode, skipping image creation and partitioning")
+		i.createStandalonePartitions(context)
+	} else {
+		fmt.Println("Running in non-standalone mode, creating and partitioning image")
+		i.createAndFormatPartitions(context)
+	}
+
 	context.ImageMntDir = path.Join(context.Scratchdir, "mnt")
 	if err := os.MkdirAll(context.ImageMntDir, 0755); err != nil {
 		return fmt.Errorf("failed to create mount directory: %w", err)
@@ -682,6 +764,7 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 		case "fat", "fat12", "fat16", "fat32", "msdos":
 			fsType = "vfat"
 		}
+		//TODO CHECK OUTPUT
 		err = syscall.Mount(dev, mntpath, fsType, 0, "")
 		if err != nil {
 			return fmt.Errorf("%s mount failed: %w", m.part.Name, err)
