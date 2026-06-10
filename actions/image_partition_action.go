@@ -639,7 +639,7 @@ func (i *ImagePartitionAction) createAndFormatPartitions(context *debos.Context)
 			}
 		}
 
-		lock, err := lockImage(context)
+		lock, err := lockImage(context, i.Standalone)
 		if err != nil {
 			return err
 		}
