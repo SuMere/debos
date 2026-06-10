@@ -362,6 +362,12 @@ func (i *ImagePartitionAction) triggerDeviceNodes(context *debos.Context) error 
 
 func (i ImagePartitionAction) PreMachine(context *debos.Context, m *fakemachine.Machine,
 	args *[]string) error {
+
+	if i.Standalone {
+		fmt.Println("PreMachine: running in standalone mode, skipping image creation and partitioning")
+		return nil
+	}
+
 	imagePath := path.Join(context.Artifactdir, i.ImageName)
 	image, err := m.CreateImage(imagePath, i.size)
 	if err != nil {
@@ -474,6 +480,12 @@ func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Contex
 }
 
 func (i *ImagePartitionAction) PreNoMachine(context *debos.Context) error {
+	if i.Standalone {
+		i.usingLoop = false
+		fmt.Println("PreNoMachine: running in standalone mode, skipping image creation and partitioning")
+		return nil
+	}
+
 	imagePath := path.Join(context.Artifactdir, i.ImageName)
 	img, err := os.OpenFile(imagePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
@@ -647,7 +659,7 @@ func (i *ImagePartitionAction) createAndFormatPartitions(context *debos.Context)
 	return nil
 }
 
-func (part *Partition) checkSize() (imgSize int64, err error) {
+func (part *Partition) checkSize(i *ImagePartitionAction) (imgSize int64, err error) {
 	var getSizeValueFunc func(size string) (int64, error)
 	if regexp.MustCompile(`^[0-9.]+[kmgtp]ib+$`).MatchString(strings.ToLower(i.ImageSize)) {
 		getSizeValueFunc = units.RAMInBytes
@@ -659,8 +671,10 @@ func (part *Partition) checkSize() (imgSize int64, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse partition start size: %w", err)
 	}
-	if start != 0 {
+	if i.Standalone && start != 0 {
 		return 0, fmt.Errorf("invalid partition start size: %s, when in standalone mode start should be 0", part.Start)
+	} else if !i.Standalone && start < 0 {
+		return 0, fmt.Errorf("invalid partition start size: %s, when not in standalone mode start should be greater than or equal to 0", part.Start)
 	}
 
 	end, err := getSizeValueFunc(part.End)
@@ -668,10 +682,10 @@ func (part *Partition) checkSize() (imgSize int64, err error) {
 		return 0, fmt.Errorf("failed to parse partition end size: %w", err)
 	}
 	if end <= 0 {
-		return 0, fmt.Errorf("invalid partition end size: %s, when in standalone mode end should be greater than 0", part.End)
+		return 0, fmt.Errorf("invalid partition end size: %s, end should be greater than 0", part.End)
 	}
 
-	return end, nil
+	return end - start, nil
 }
 
 func (i *ImagePartitionAction) createStandalonePartitions(context *debos.Context) error {
@@ -685,7 +699,7 @@ func (i *ImagePartitionAction) createStandalonePartitions(context *debos.Context
 			return fmt.Errorf("couldn't open partition file: %w", err)
 		}
 
-		size, err := current_partition.checkSize()
+		size, err := current_partition.checkSize(i)
 		if err != nil {
 			return fmt.Errorf("invalid partition size: %w", err)
 		}
@@ -747,7 +761,7 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 		return strings.Count(mntA, "/") < strings.Count(mntB, "/")
 	})
 
-	lock, err := lockImage(context)
+	lock, err := lockImage(context, i.Standalone)
 	if err != nil {
 		return err
 	}
@@ -763,6 +777,12 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 		switch m.part.FS {
 		case "fat", "fat12", "fat16", "fat32", "msdos":
 			fsType = "vfat"
+		case "ext2":
+			fsType = "ext2"
+		case "ext3":
+			fsType = "ext3"
+		case "ext4":
+			fsType = "ext4"
 		}
 		//TODO CHECK OUTPUT
 		err = syscall.Mount(dev, mntpath, fsType, 0, "")
@@ -780,6 +800,11 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 	err = i.generateKernelRoot(context)
 	if err != nil {
 		return err
+	}
+
+	if i.Standalone {
+		fmt.Println("Standalone mode: skipping triggering device nodes")
+		return nil
 	}
 
 	/* Now that all partitions are created (re)trigger all udev events for
@@ -843,12 +868,24 @@ func (i ImagePartitionAction) PostMachineCleanup(context *debos.Context) error {
 	image := path.Join(context.Artifactdir, i.ImageName)
 	/* Remove the image in case of any action failure */
 	if context.State != debos.Success {
-		if _, err := os.Stat(image); !os.IsNotExist(err) {
-			if err = os.Remove(image); err != nil {
-				return err
+		if i.Standalone {
+			for partion := range context.ImagePartitions {
+				image := path.Join(context.Artifactdir, i.ImageName+"-"+context.ImagePartitions[partion].Name)
+				if _, err := os.Stat(image); !os.IsNotExist(err) {
+					if err = os.Remove(image); err != nil {
+						return err
+					}
+				}
+			}
+		} else {
+			if _, err := os.Stat(image); !os.IsNotExist(err) {
+				if err = os.Remove(image); err != nil {
+					return err
+				}
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -946,7 +983,7 @@ func (i *ImagePartitionAction) Verify(_ *debos.Context) error {
 			}
 		}
 
-		if i.PartitionType != "gpt" && p.PartLabel != "" {
+		if i.PartitionType != "gpt" && p.PartLabel != "" && !i.Standalone {
 			return fmt.Errorf("can only set partition partlabel on GPT filesystem")
 		}
 
@@ -962,7 +999,7 @@ func (i *ImagePartitionAction) Verify(_ *debos.Context) error {
 			}
 		}
 
-		if p.PartType != "" {
+		if p.PartType != "" && !i.Standalone {
 			var partTypeLen int
 			switch i.PartitionType {
 			case "gpt":
@@ -1054,21 +1091,25 @@ func (i *ImagePartitionAction) Verify(_ *debos.Context) error {
 		}
 	}
 
-	// Calculate the size based on the unit (binary or decimal)
-	// binary units are multiples of 1024 - KiB, MiB, GiB, TiB, PiB
-	// decimal units are multiples of 1000 - KB, MB, GB, TB, PB
-	var getSizeValueFunc func(size string) (int64, error)
-	if regexp.MustCompile(`^[0-9.]+[kmgtp]ib+$`).MatchString(strings.ToLower(i.ImageSize)) {
-		getSizeValueFunc = units.RAMInBytes
-	} else {
-		getSizeValueFunc = units.FromHumanSize
+	//Not calculating the image size in standalone mode as it is not needed and can be error-prone due to possible overlaps of partitions
+	if !i.Standalone {
+		// Calculate the size based on the unit (binary or decimal)
+		// binary units are multiples of 1024 - KiB, MiB, GiB, TiB, PiB
+		// decimal units are multiples of 1000 - KB, MB, GB, TB, PB
+		var getSizeValueFunc func(size string) (int64, error)
+		if regexp.MustCompile(`^[0-9.]+[kmgtp]ib+$`).MatchString(strings.ToLower(i.ImageSize)) {
+			getSizeValueFunc = units.RAMInBytes
+		} else {
+			getSizeValueFunc = units.FromHumanSize
+		}
+
+		size, err := getSizeValueFunc(i.ImageSize)
+		if err != nil {
+			return fmt.Errorf("failed to parse image size: %s", i.ImageSize)
+		}
+
+		i.size = size
 	}
 
-	size, err := getSizeValueFunc(i.ImageSize)
-	if err != nil {
-		return fmt.Errorf("failed to parse image size: %s", i.ImageSize)
-	}
-
-	i.size = size
 	return nil
 }
