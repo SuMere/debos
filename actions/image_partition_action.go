@@ -380,8 +380,13 @@ func (i ImagePartitionAction) PreMachine(context *debos.Context, m *fakemachine.
 }
 
 func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Context) error {
+	var path string
 	label := fmt.Sprintf("Formatting partition %d", p.number)
-	path := i.getPartitionDevice(p.number, context)
+	if i.Standalone {
+		path = path.Join(context.Artifactdir, i.ImageName+"-"+p.Name)
+	} else {
+		path = i.getPartitionDevice(p.number, context)
+	}
 
 	cmdline := []string{}
 	switch p.FS {
@@ -447,7 +452,9 @@ func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Contex
 	}
 
 	if len(cmdline) != 0 {
+		fmt.Printf("Formatting partition %d with filesystem %s\n", p.number, p.FS)
 		cmdline = append(cmdline, path)
+		fmt.Printf("command line is: %s\n", strings.Join(cmdline, " "))
 
 		cmd := debos.Command{}
 
