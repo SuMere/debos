@@ -380,12 +380,12 @@ func (i ImagePartitionAction) PreMachine(context *debos.Context, m *fakemachine.
 }
 
 func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Context) error {
-	var path string
 	label := fmt.Sprintf("Formatting partition %d", p.number)
+	var imagePath string
 	if i.Standalone {
-		path = path.Join(context.Artifactdir, i.ImageName+"-"+p.Name)
+		imagePath = path.Join(context.Artifactdir, i.ImageName+"-"+p.Name)
 	} else {
-		path = i.getPartitionDevice(p.number, context)
+		imagePath = i.getPartitionDevice(p.number, context)
 	}
 
 	cmdline := []string{}
@@ -453,7 +453,7 @@ func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Contex
 
 	if len(cmdline) != 0 {
 		fmt.Printf("Formatting partition %d with filesystem %s\n", p.number, p.FS)
-		cmdline = append(cmdline, path)
+		cmdline = append(cmdline, imagePath)
 		fmt.Printf("command line is: %s\n", strings.Join(cmdline, " "))
 
 		cmd := debos.Command{}
@@ -476,7 +476,7 @@ func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Contex
 	}
 
 	if p.FS != "none" && p.FSUUID == "" {
-		uuid, err := exec.Command("blkid", "-o", "value", "-s", "UUID", "-p", "-c", "none", path).Output()
+		uuid, err := exec.Command("blkid", "-o", "value", "-s", "UUID", "-p", "-c", "none", imagePath).Output()
 		if err != nil {
 			return fmt.Errorf("failed to get uuid: %w", err)
 		}
