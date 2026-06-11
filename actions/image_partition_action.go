@@ -781,12 +781,6 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 		switch m.part.FS {
 		case "fat", "fat12", "fat16", "fat32", "msdos":
 			fsType = "vfat"
-		case "ext2":
-			fsType = "ext2"
-		case "ext3":
-			fsType = "ext3"
-		case "ext4":
-			fsType = "ext4"
 		}
 		//TODO CHECK OUTPUT
 		err = syscall.Mount(dev, mntpath, fsType, 0, "")
