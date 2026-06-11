@@ -331,6 +331,10 @@ func (i *ImagePartitionAction) generateKernelRoot(context *debos.Context) error 
 }
 
 func (i ImagePartitionAction) getPartitionDevice(number int, context debos.Context) string {
+	if i.Standalone {
+		return path.Join(context.Artifactdir, i.ImageName+"-"+i.Partitions[number-1].Name)
+	}
+
 	/* Always look up canonical device as udev might not generate the by-id
 	 * symlinks while there is an flock on /dev/vda */
 	device, _ := filepath.EvalSymlinks(context.Image)
@@ -381,12 +385,7 @@ func (i ImagePartitionAction) PreMachine(context *debos.Context, m *fakemachine.
 
 func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Context) error {
 	label := fmt.Sprintf("Formatting partition %d", p.number)
-	var imagePath string
-	if i.Standalone {
-		imagePath = path.Join(context.Artifactdir, i.ImageName+"-"+p.Name)
-	} else {
-		imagePath = i.getPartitionDevice(p.number, context)
-	}
+	path := i.getPartitionDevice(p.number, context)
 
 	cmdline := []string{}
 	switch p.FS {
@@ -452,9 +451,7 @@ func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Contex
 	}
 
 	if len(cmdline) != 0 {
-		fmt.Printf("Formatting partition %d with filesystem %s\n", p.number, p.FS)
-		cmdline = append(cmdline, imagePath)
-		fmt.Printf("command line is: %s\n", strings.Join(cmdline, " "))
+		cmdline = append(cmdline, path)
 
 		cmd := debos.Command{}
 
@@ -476,7 +473,7 @@ func (i ImagePartitionAction) formatPartition(p *Partition, context debos.Contex
 	}
 
 	if p.FS != "none" && p.FSUUID == "" {
-		uuid, err := exec.Command("blkid", "-o", "value", "-s", "UUID", "-p", "-c", "none", imagePath).Output()
+		uuid, err := exec.Command("blkid", "-o", "value", "-s", "UUID", "-p", "-c", "none", path).Output()
 		if err != nil {
 			return fmt.Errorf("failed to get uuid: %w", err)
 		}
@@ -892,7 +889,6 @@ func (i ImagePartitionAction) PostMachineCleanup(context *debos.Context) error {
 			}
 		}
 	}
-
 	return nil
 }
 
