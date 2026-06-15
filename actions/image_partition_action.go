@@ -782,8 +782,7 @@ func (i ImagePartitionAction) Run(context *debos.Context) error {
 		case "fat", "fat12", "fat16", "fat32", "msdos":
 			fsType = "vfat"
 		}
-		//TODO CHECK OUTPUT
-		err = syscall.Mount(dev, mntpath, fsType, 0, "")
+		err = debos.Command{}.Run("mount", "mount", dev, mntpath, "-t", fsType)
 		if err != nil {
 			return fmt.Errorf("%s mount failed: %w", m.part.Name, err)
 		}
